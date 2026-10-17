@@ -1,0 +1,56 @@
+# =============================================================
+# LeadWise AI - sundries .gitignore
+# =============================================================
+
+# --- Environment Variables & Secrets ---
+# Never commit .env files. They contain database passwords and API keys.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Python Bytecode & Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Distribution / Packaging ---
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- Flask / Gunicorn ---
+instance/
+.webassets-cache
+*.log
+gunicorn.pid
+
+# --- IDEs and Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- Local Databases (if you ever use SQLite locally) ---
+*.sqlite3
+*.db
+
+# --- Cloud / Deployment specific ---
+# Ignore any local Cloud Run / GCP credentials
+gcloud-credentials.json
+.service-account.json
