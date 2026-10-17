@@ -1,0 +1,22 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+ENV/
+
+# Env & Secrets
+.env
+.env.*
+
+# Local dev files
+*.log
+.DS_Store
+tree.txt
+logs/
