@@ -22,9 +22,9 @@ TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET_KEY", "")
 MAX_QUESTION_LEN = 500
 SIMILARITY_CUTOFF = 0.8
 
-# Strict Rate Limiting: 5 questions per 10 minutes per IP
-RATE_LIMIT_MAX = 5
-RATE_LIMIT_WINDOW_MINUTES = 10
+# Fallbacks if the DB settings are missing
+DEFAULT_RATE_LIMIT_MAX = 25
+DEFAULT_RATE_LIMIT_WINDOW = 60
 
 def _hash_ip(ip):
     if not ip: return "unknown"
@@ -57,7 +57,6 @@ def ask_ai():
     
     # 1. Input Sanitization & Validation
     question = str(data.get("question", "")).strip()
-    # Strip basic HTML tags to prevent XSS
     question = re.sub(r'<[^>]+>', '', question) 
     
     raw_locale = data.get("locale", "en")
@@ -86,20 +85,33 @@ def ask_ai():
     chunks_found = 0
     history_rows = []
 
-    # 3. Security: Strict Rate Limiting
+    # 3. Security: Strict Rate Limiting (Dynamic from settings table)
     try:
         conn = get_conn()
         try:
             with conn.cursor() as cur:
-                cutoff = datetime.utcnow() - timedelta(minutes=RATE_LIMIT_WINDOW_MINUTES)
+                # Fetch both settings dynamically
+                cur.execute("""
+                    SELECT setting_key, setting_value 
+                    FROM settings 
+                    WHERE setting_key IN ('ask_ai_rate_limit_max', 'ask_ai_rate_limit_window_minutes')
+                    AND CURRENT_DATE BETWEEN start_date AND end_date
+                """)
+                rows = cur.fetchall()
+                settings = {row['setting_key']: int(row['setting_value']) for row in rows}
+                
+                rate_limit_max = settings.get('ask_ai_rate_limit_max', DEFAULT_RATE_LIMIT_MAX)
+                rate_limit_window = settings.get('ask_ai_rate_limit_window_minutes', DEFAULT_RATE_LIMIT_WINDOW)
+                
+                cutoff = datetime.utcnow() - timedelta(minutes=rate_limit_window)
                 cur.execute(
                     "SELECT count(*) FROM ask_ai_log WHERE ip_hash = %s AND submitted_at > %s",
                     (ip_hash, cutoff)
                 )
                 count = cur.fetchone()["count"]
-                if count >= RATE_LIMIT_MAX:
-                    print(f"[Ask AI] [{submission_id[:8]}] Rate limit exceeded for IP hash {ip_hash[:8]}")
-                    return jsonify({"error": "Rate limit exceeded"}), 429
+                if count >= rate_limit_max:
+                    print(f"[Ask AI] [{submission_id[:8]}] Rate limit exceeded ({count}/{rate_limit_max} per {rate_limit_window}m) for IP hash {ip_hash[:8]}")
+                    return jsonify({"error": "You have reached the limit for AI questions. Please try again later.", "submission_id": submission_id}), 429
         finally:
             conn.close()
     except Exception as e:
@@ -111,7 +123,6 @@ def ask_ai():
             conn = get_conn()
             try:
                 with conn.cursor() as cur:
-                    # Only fetch if BOTH session_id and ip_hash match
                     cur.execute(
                         "SELECT question, answer FROM ask_ai_log "
                         "WHERE session_id = %s AND ip_hash = %s AND status = 'success' "
@@ -175,7 +186,6 @@ def ask_ai():
                 context_text = "\n\n---\n\n".join(r["chunk_text"] for r in rows)
                 print(f"[Ask AI] [{submission_id[:8]}] Found {chunks_found} relevant chunks.")
                 
-                # Print the chunks to the logs for debugging
                 for idx, row in enumerate(rows):
                     clean_text = row['chunk_text'].replace('\n', ' ')
                     print(f"[Ask AI] [{submission_id[:8]}] Chunk {idx+1}: {clean_text[:80]}...")
