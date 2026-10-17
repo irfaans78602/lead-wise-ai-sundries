@@ -40,7 +40,7 @@ Write-Host "=====================================================" -ForegroundCo
 # Modify these if your GitHub username, repo name, or GCP region changes.
 # =====================================================================
 $env:PROJECT_ID="lead-wise-ai-sundries"
-$env:REGION="us-central1"
+$env:REGION="africa-south1"
 $env:REPO_NAME="sundries-repo"
 $env:SA_NAME="github-deployer"
 $env:POOL_ID="github-pool"
