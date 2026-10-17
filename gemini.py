@@ -111,10 +111,20 @@ def generate_answer(question, context, history=None):
     securely isolating the user's input to prevent prompt injection.
     """
     history_text = "No previous conversation." 
+    is_follow_up = False
+    
     if history:
+        is_follow_up = True
         history_text = ""
         for row in history:
             history_text += f"User: {row['question']}\nAssistant: {row['answer']}\n"
+
+    # Dynamically adjust the greeting rule based on whether this is the first message
+    greeting_rule = (
+        "2. **No Greetings**: Because there is conversation history above, DO NOT start your response with a greeting (like 'Hello', 'Hi', 'Hey') and DO NOT repeatedly use the user's name. You are already in a conversation. Just answer the question directly."
+        if is_follow_up else
+        "2. **Greetings & Pleasantries**: If the user greets you (e.g., 'Hi', 'Hola', 'Bonjour'), greet them back warmly in the SAME language and ask how you can help."
+    )
 
     # SECURITY: Use XML tags to isolate user input from system instructions.
     # FLEXIBILITY: Instruct the AI to act naturally, use common sense, and 
@@ -133,8 +143,8 @@ Here is the context retrieved from the LeadWise AI website:
 </context>
 
 ### Guidelines:
-1. **Greetings & Pleasantries**: If the user greets you (e.g., "Hi", "Hola", "Bonjour"), greet them back warmly in the SAME language and ask how you can help.
-2. **Personal details**: If the user shares their name or personal business details, acknowledge them politely. Use your common sense to map their business to our tiers (e.g., if they say "I am a barber", map that to "Beauty & Personal Care" or "Trades", which is Tier 1).
+1. **Personal details**: If the user shares their name or personal business details, acknowledge them politely ONLY ONCE when they first say it. Use your common sense to map their business to our tiers (e.g., if they say "I am a barber", map that to "Beauty & Personal Care" or "Trades", which is Tier 1).
+{greeting_rule}
 3. **Answering Questions**: Use the context to answer accurately. If they ask for pricing, website info, or SEO details, provide the exact figures found in the context. Do not say you don't know if the information is present in the context.
 4. **Missing Information**: If the answer is truly not in the context and it's not a greeting or personal detail, politely say: "I don't have that information, but you can contact us at contact@lead-wise-ai.com".
 5. **Language**: Always respond in the SAME language the user is speaking.
