@@ -1,0 +1,15 @@
+{
+  "SEGMENT_TIERS_OVERVIEW": "LeadWise AI prices and targets by business type, grouped into four segment value tiers: Tier 1 (Standard), Tier 2 (Professional), Tier 3 (High-value), and Tier 4 (Premium). The segment list is identical in every country. Only the currency amounts differ.",
+  
+  "TIER_1_STANDARD": "Tier 1 (Standard) has a base fee of R500-R1,000 per month and a per-lead fee of R25-R35 in ZAR. It includes these 6 segments: Trades & Home Services (plumbers, electricians, cleaners), Beauty & Personal Care (salons, barbers, spas), Pet Services (vets, groomers, dog walkers), Hospitality & Bookings (restaurants, hotels, B&Bs), Fitness & Coaching (gyms, personal trainers), and Non-Profit / NGO.",
+  
+  "TIER_2_PROFESSIONAL": "Tier 2 (Professional) has a base fee of R1,000-R1,500 per month and a per-lead fee of R40-R50 in ZAR. It includes these 4 segments: Education & Training (driving schools, tutoring, bootcamps), Professional Services (accountants, consultants, recruitment), Retail & E-commerce (furniture, clothing, online stores), and Travel & Tourism (tour operators, travel agents).",
+  
+  "TIER_3_HIGH_VALUE": "Tier 3 (High-value) has a base fee of R1,500-R2,500 per month and a per-lead fee of R60-R75 in ZAR. It includes these 7 segments: Automotive (car dealerships, mechanics), Health & Wellness (dentists, physiotherapists, doctors), High-Ticket Services (solar installers, construction, cosmetic surgeons), Logistics & Transport (couriers, moving companies), Agriculture & Farming, Events & Entertainment (wedding venues, photographers), and Other / Bespoke businesses.",
+  
+  "TIER_4_PREMIUM": "Tier 4 (Premium) has a base fee of R2,500-R4,000 per month and a per-lead fee of R100-R120 in ZAR. It includes these 6 segments: Real Estate (agencies, property developers), B2B / Enterprise (manufacturers, wholesalers), Financial Services (insurance brokers, financial advisors), Legal Services (law firms, conveyancers), Franchise Groups, and SaaS, IT & Technology (software vendors, IT support). LeadWise AI itself operates on this tier under the SaaS segment.",
+  
+  "VOLUME_DISCOUNTS": "LeadWise AI offers marginal volume discounts. The first 25 leads in a month are full price (0% discount). Leads 26-100 receive a 15% discount. Leads 101-500 receive a 25% discount. Leads 501 and above receive a 35% discount. Each discount applies only to the leads inside that band, not the whole month.",
+  
+  "EXCLUDED_INDUSTRIES": "LeadWise AI does not onboard clients in four specific industries: alcohol, gambling, adult/pornographic content, and cannabis. These are excluded because Meta's advertising and WhatsApp Business policies restrict or prohibit them, and one client in a restricted industry could put the platform's Meta access at risk for every other client."
+}

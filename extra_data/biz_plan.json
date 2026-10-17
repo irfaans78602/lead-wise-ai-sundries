@@ -1,0 +1,31 @@
+{
+  "EXECUTIVE_SUMMARY_PROBLEM": "Most businesses invest in generating enquiries but handle the moment of enquiry manually. This causes three recurring problems: slow response times (enquiries are answered hours or days later, by which point the prospect has often contacted a competitor), inconsistent qualification (different staff ask different questions, or none at all), and no visibility into drop-off (businesses rarely know how many enquiries they lose, or at which step).",
+  
+  "EXECUTIVE_SUMMARY_SOLUTION": "LeadWise AI solves this by inserting an always-on, structured qualification layer between the moment of enquiry and the business's sales process, on every channel the enquiry arrives through. The platform captures and qualifies enquiries on WhatsApp, Facebook Messenger, Instagram, TikTok, client websites, and paid ads. One engine runs across every channel, every language, and every client.",
+  
+  "THE_TWO_ENGINES": "LeadWise AI uses two engines. Engine 1 (Qualification Engine) looks up the ad's questions, adapts the flow to prior answers, validates each answer, saves the response, and advances the conversation. Engine 2 (Scoring Engine) sums the scores attached to each chosen option, calculates the Qualification Score, applies the ad's own score bands, and determines the Qualification Level. Nothing in either engine differs by channel or client. Only configuration data differs.",
+  
+  "SAME_TECHNOLOGY_STACK": "There is no internal-only version and no client-only version of the platform. Every client website is built using the exact same technology stack that LeadWise AI uses for its own website (Cloudflare Pages, Zoho Business Email, static HTML/CSS/JS). Every new capability is battle-tested on LeadWise AI's own enquiries before a client sees it.",
+  
+  "FLAGSHIP_WEBSITE_INCLUSIONS": "The one-time website setup fee includes: Four standard pages (Home, About, Services, Contact) with the chat widget and contact form, domain registration in the client's name (cost paid by client), business email setup, DNS/SSL/hosting configuration, responsive design, SEO structure, five languages, three currencies, social-media integration, and legal pages (Privacy Policy, Lead Information Notice, Terms of Service, PAIA Manual, POPIA Compliance).",
+  
+  "FLAGSHIP_WEBSITE_EXCLUSIONS": "The setup fee does not include: Domain registration and business email subscriptions (paid directly to providers), ad spend (paid directly to Meta/TikTok/Google), copywriting and photography (quoted separately or supplied by client), ongoing content changes (quoted separately), logo design, ecommerce, booking systems, or custom web applications.",
+  
+  "CO_PILOT_ONBOARDING_TIMES": "Co-pilot onboarding session times and go-live depend on the client's tier. Tier 1 takes 1-2 hours and goes live in 3-5 business days. Tier 2 takes 2-3 hours and goes live in 5-7 business days. Tier 3 takes 3-4 hours and goes live in 7-10 business days. Tier 4 takes 4-6 hours (in two sessions) and goes live in 10-14 business days.",
+  
+  "SUPPORTING_SERVICES_SEO_ADS": "Supporting services drive traffic into the same qualification engine. SEO includes keyword research, on-page/content optimisation, technical SEO, local SEO, and Google Business Profile optimisation. Ads Management handles campaign and audience configuration on Facebook, Instagram, Google, and TikTok, with conversion tracking tied to qualification completions.",
+  
+  "PILOT_PROGRAMME_DETAILS": "LeadWise AI onboards a small number of pilot clients. Website setup is 50% off (R2,475 instead of R4,950). The base fee is 50% off for 6 months. Per-lead fees are at full price. The pilot is month-to-month for the first 6 months; afterwards, normal rates apply.",
+  
+  "CONTRACT_AND_CANCELLATION_POLICY": "LeadWise AI does not force clients into long-term lock-in contracts. The initial pilot period is month-to-month for the first 6 months. After the first 6 months, clients transition to normal standard rates. If a client wishes to cancel their service, they can do so at any time by providing written notice before their next billing cycle. There are no early termination penalties.",
+  
+  "SUPPORT_AND_HELP": "LeadWise AI does not hand you a tool and abandon you. Every client is onboarded live via a screen-share session. If you get stuck, or want to change your qualification questions, the team is available to help. The relationship is the moat—we succeed when you succeed.",
+  
+  "COMPANY_TEAM": "LeadWise AI is founder-owned. The Founder, CEO & CTO is Irfaan Sulaiman, who is a Solutions Architect and Senior Full Stack Engineer that built the platform end to end. The COO is Armina Sulaiman (Operations, Client Accounts, Invoicing). The Director of Web Services is Tabassum Simons (Web Design, Web Development). All three team members are family.",
+  
+  "FINANCIAL_TARGETS": "The business is break-even from the first paying client. By Month 6, the plan targets 13 active clients (4 Tier 1, 4 Tier 2, 3 Tier 3, 2 Tier 4) averaging 15 to 20 qualified leads per month each, producing approximately R30,000 in monthly recurring revenue on a ~100% gross margin.",
+  
+  "RISK_MITIGATION": "Meta platform policy changes are mitigated because the channel layer is isolated from the core qualification logic. Low chatbot completion rates are mitigated by abandonment tracking. Data privacy risks are mitigated by per-client data isolation and DPAs.",
+  
+  "EXIT_STRATEGY": "LeadWise AI is founder-owned. The exit question is deferred until Year 5. If pursued, the only acceptable path is acquisition by a large enterprise that wants to add the qualification engine and multi-channel coverage to its existing operations."
+}

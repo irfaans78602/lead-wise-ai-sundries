@@ -1,0 +1,15 @@
+{
+  "ASK_AI_HELPER_INFO": "The Ask AI helper is an informational layer powered by Gemini and Retrieval-Augmented Generation (RAG). It answers public questions about LeadWise AI's services, pricing, and onboarding by searching our own marketing content. It is the same capability we sell as the Extension service.",
+  
+  "HOW_SCORING_WORKS": "Questions carry options with specific scores attached. The sum of the chosen scores becomes the Qualification Score. Each ad defines its own score bands, mapping ranges of scores to Qualification Levels (Low, Medium, High, Very High). This tells your team who to call first.",
+  
+  "ABANDONMENT_TRACKING": "LeadWise AI records exactly where a prospect abandons a qualification, per question per ad. This produces a qualification funnel report showing which question loses the most prospects, so you can address it. Abandoned conversations are never billed.",
+  
+  "DEFINITION_QUALIFIED_LEAD": "A qualified lead is a prospect who has completed every question in the qualification flow, whose submitted phone number and email address have passed validation, and whose response has been recorded with a Qualification Score and Qualification Level.",
+  
+  "CUSTOMER_STATUS_VS_SCORE": "The Qualification Score and Level are recorded for prioritisation and reporting only. They do not affect billability. Customer Status is what the client does with the lead after handover (e.g., Contacted, Converted). Every status change is recorded with who, when, and why.",
+  
+  "POPIA_COMPLIANCE": "LeadWise AI complies with POPIA (Protection of Personal Information Act) and GDPR. Every client receives a Data Processing Agreement (DPA). Prospect personal information is isolated per client at the platform level and has a defined retention policy.",
+  
+  "DEMO_ENVIRONMENT": "LeadWise AI has a public demo microsite and static demo dashboards. Demo conversations are purged 72 hours after creation. You can visit the live demo page to see the qualification flow in action."
+}
