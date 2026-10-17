@@ -20,7 +20,7 @@ def _hash_ip(ip):
     return hashlib.sha256((ip + CONTACT_LOG_IP_SALT).encode()).hexdigest()
 
 def _clean(value, max_len):
-    return str(value or "").strip().slice(0, max_len) if value is not None else ""
+    return str(value or "").strip()[:max_len] if value is not None else ""
 
 @bp.route("/api/contact-log", methods=["POST"])
 def contact_log():
