@@ -13,9 +13,11 @@ bp = Blueprint("ask_ai", __name__)
 
 CONTACT_LOG_IP_SALT = os.environ.get("CONTACT_LOG_IP_SALT", "")
 MAX_QUESTION_LEN = 1000
+
 # Cosine distance threshold: only use chunks closer than this (lower = more similar).
-# Tune this value against your data.
-SIMILARITY_CUTOFF = 0.5
+# 0.0 is identical, 1.0 is completely unrelated.
+# We relax this to 0.8 to allow natural conversational phrasing to match.
+SIMILARITY_CUTOFF = 0.8
 
 def _hash_ip(ip):
     if not ip: return None
@@ -25,7 +27,10 @@ def _hash_ip(ip):
 def ask_ai():
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
-    locale = data.get("locale", "en")
+    
+    # Normalize locale to just the 2-letter code (e.g., 'en-ZA' -> 'en')
+    raw_locale = data.get("locale", "en")
+    locale = raw_locale[:2].lower() if raw_locale else "en"
 
     if not question:
         return jsonify({"error": "Question is required"}), 400
@@ -70,6 +75,7 @@ def ask_ai():
                     rows = [r for r in cur.fetchall() if r["dist"] < SIMILARITY_CUTOFF]
                 
                 context_text = "\n\n---\n\n".join(r["chunk_text"] for r in rows)
+                print(f"Found {len(rows)} chunks for question: {question[:50]}...")
         finally:
             conn.close()
     except Exception as e:
