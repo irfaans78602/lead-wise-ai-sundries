@@ -4,4 +4,3 @@ gunicorn==22.0.0
 psycopg2-binary>=2.9.10
 google-genai>=1.0.0
 google-auth>=2.20.0
-google-auth-requests>=0.1.0
