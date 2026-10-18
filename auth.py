@@ -1,20 +1,6 @@
 """
 auth.py
 Google OAuth sign-in for the two portals.
-
-Two OAuth clients, one callback path parameterised by portal. The
-portal is enforced by Google: a token issued to the agency client
-cannot be replayed against the client callback, because the aud claim
-won't match. That makes the portal distinction a fact about the token,
-not a hint from a URL parameter.
-
-Sign-in is invite-only. There is no signup form. If the Google sub is
-not in client_users (client portal) or agency_users (agency portal),
-sign-in is rejected and the operator is emailed the sub and email so
-they can add the user via the loader.
-
-The loader owns writes to client_users and agency_users. This module
-reads them and establishes a session; it never creates rows.
 """
 
 import os
@@ -29,7 +15,9 @@ from flask import (
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
-from db import get_conn  # <--- CHANGED THIS LINE
+# --- THIS IS THE FIX ---
+from db import get_conn
+# -----------------------
 
 bp = Blueprint("auth", __name__)
 
@@ -77,8 +65,6 @@ def google_start(portal):
     if not client_id:
         return jsonify({"error": f"portal {portal} not configured"}), 500
 
-    # OAuth CSRF nonce. Stored in the signed session cookie; the
-    # callback compares it against what Google echoes back.
     nonce = secrets.token_urlsafe(24)
     session[f"oauth_nonce_{portal}"] = nonce
 
@@ -106,7 +92,6 @@ def google_callback(portal):
     if not (client_id and client_secret):
         return jsonify({"error": f"portal {portal} not configured"}), 500
 
-    # 1. CSRF check.
     expected_nonce = session.pop(f"oauth_nonce_{portal}", None)
     provided_nonce = request.args.get("state", "")
     if not expected_nonce or not secrets.compare_digest(expected_nonce, provided_nonce):
@@ -116,7 +101,6 @@ def google_callback(portal):
     if not code:
         return jsonify({"error": "missing code"}), 400
 
-    # 2. Exchange the code for tokens.
     try:
         tokens = _exchange_code(code, client_id, client_secret,
                                 f"{_REDIRECT_BASE}/{portal}")
@@ -128,8 +112,6 @@ def google_callback(portal):
     if not raw_id_token:
         return jsonify({"error": "no id_token in response"}), 502
 
-    # 3. Verify the ID token. This checks signature, iss, aud, exp.
-    #    It is the authorization-critical step — never skip it.
     try:
         claims = id_token.verify_oauth2_token(
             raw_id_token,
@@ -148,16 +130,12 @@ def google_callback(portal):
         print(f"[auth:{portal}] unverified email for sub={sub}")
         return jsonify({"error": "email not verified"}), 403
 
-    # 4. Look up in the table the portal owns.
     user = _lookup_user(portal, sub)
 
     if user is None:
-        # Invite-only. Notify the operator, reject the sign-in.
         _email_unknown_signup(portal, sub, email, name)
         return redirect(_ACCESS_DENIED)
 
-    # 5. Establish the session. Everything the rest of the app needs
-    #    to authorise requests lives here.
     session.clear()
     session["portal"]     = portal
     session["google_sub"] = sub
@@ -165,11 +143,11 @@ def google_callback(portal):
     session["display_name"] = name
     if portal == "client":
         session["client_user_id"] = user["client_user_id"]
-        session["client_id"]      = user["client_id"]     # may be None
+        session["client_id"]      = user["client_id"]
         session["role"]           = user["role"]
     else:
         session["agency_user_id"] = user["agency_user_id"]
-        session["agency_id"]      = user["agency_id"]     # may be None
+        session["agency_id"]      = user["agency_id"]
         session["role"]           = user["role"]
 
     return redirect(_PORTAL_URL[portal])
@@ -186,7 +164,7 @@ def signout():
 
 
 # -------------------------------------------------------------
-# Token exchange (raw HTTP, matching embedded_signup.py's style)
+# Token exchange
 # -------------------------------------------------------------
 
 def _exchange_code(code, client_id, client_secret, redirect_uri):
@@ -238,7 +216,7 @@ def _lookup_user(portal, sub):
 
 
 # -------------------------------------------------------------
-# Operator email for unknown sign-ups
+# Operator email
 # -------------------------------------------------------------
 
 def _email_unknown_signup(portal, sub, email, name):
@@ -275,9 +253,6 @@ To allow this user, add to LeadWiseAI/{json_file}:
 Then run:
 
   loader LeadWiseAI/{json_file} --commit
-
-Until then, this user cannot sign in. The row is written to
-{table}; nothing else is created by a rejected sign-in.
 """
 
     try:
