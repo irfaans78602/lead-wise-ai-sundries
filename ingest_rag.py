@@ -1,287 +1,385 @@
 """
 ingest_rag.py
-Reads the site's English JSON files, plus built HTML files, chunks the values, 
-embeds them via Gemini, and inserts them into the site_content table.
-
-Usage:
-    python ingest_rag.py json
-    python ingest_rag.py html
-    python ingest_rag.py extra
-    python ingest_rag.py json html extra
+Generic ingestion pipeline (JSON, HTML, PDF, Web URL).
+Implements 80/20 HTML and PDF parsing, including nested Markdown lists.
 """
 import os
 import sys
 import json
 import math
 import re
-import html as html_lib
+import urllib.request
+import urllib.error
 from pathlib import Path
+from bs4 import BeautifulSoup
+from pypdf import PdfReader
 
 from gemini import embed_document
-from db import get_conn
+from db import get_conn, get_tenant_config
 
-# --- Config ---
-SITE_REPO = Path(r"C:\Irfaan\leadwiseai\lead-wise-ai.com")
-LOCALES_DIR = SITE_REPO / "src" / "data" / "locales"
-PUBLIC_DIR = SITE_REPO / "public"
-EXTRA_DATA_DIR = Path(__file__).parent / "extra_data"
+if len(sys.argv) < 3:
+    print("Usage: python ingest_rag.py <instance_id> <source> [path_or_url] --scope <public|internal> --section <root_name> [--refresh]")
+    print("Sources: json, html, pdf, url")
+    sys.exit(1)
 
-LOCALES = ["en"]
-META_KEYS = {"_comment", "_filename", "_blog"}
-SEMANTIC_DISTANCE_THRESHOLD = 0.08
+INSTANCE_ID = sys.argv[1]
+SOURCE = sys.argv[2].lower()
+TARGET = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else None
 
 # --- Strict Argument Parsing ---
-ARGS = [a.lower() for a in sys.argv[1:]]
+SCOPE_TARGET = None
+SECTION_TARGET = None
+REFRESH_MODE = "--refresh" in sys.argv
 
-if not ARGS:
-    print("ERROR: No parameters provided.")
-    print("Usage: python ingest_rag.py [json] [html] [extra]")
-    print("Example: python ingest_rag.py json html")
+if "--scope" in sys.argv:
+    idx = sys.argv.index("--scope")
+    if len(sys.argv) > idx + 1:
+        SCOPE_TARGET = sys.argv[idx + 1].lower()
+        
+if "--section" in sys.argv:
+    idx = sys.argv.index("--section")
+    if len(sys.argv) > idx + 1:
+        SECTION_TARGET = sys.argv[idx + 1]
+
+if not SCOPE_TARGET or SCOPE_TARGET not in ("public", "internal"):
+    print("ERROR: You must specify --scope public OR --scope internal")
     sys.exit(1)
 
-VALID_ARGS = {"json", "html", "extra"}
-INVALID_ARGS = set(ARGS) - VALID_ARGS
+if not SECTION_TARGET:
+    print("WARNING: No --section specified. Defaulting to 'General'.")
+    SECTION_TARGET = "General"
 
-if INVALID_ARGS:
-    print(f"ERROR: Invalid parameter(s): {', '.join(INVALID_ARGS)}")
-    print("Allowed parameters are: json, html, extra")
-    sys.exit(1)
+BASE_DIR = Path(__file__).parent
+SITE_REPO = Path(r"C:\Irfaan\leadwiseai\lead-wise-ai.com") 
 
-DO_JSON  = "json" in ARGS
-DO_HTML  = "html" in ARGS
-DO_EXTRA = "extra" in ARGS
-
+LOCALES_DIR = SITE_REPO / "src" / "data" / "locales"
+PUBLIC_DIR = SITE_REPO / "public"
+META_KEYS = {"_comment", "_filename", "_blog"}
+SEMANTIC_DISTANCE_THRESHOLD = 0.08
 
 def to_vector_literal(values):
     return "[" + ",".join(f"{v:.8f}" for v in values) + "]"
 
 def cosine_distance(vec1, vec2):
-    dot_product = sum(a * b for a, b in zip(vec1, vec2))
-    magnitude1 = math.sqrt(sum(a * a for a in vec1))
-    magnitude2 = math.sqrt(sum(b * b for b in vec2))
-    if magnitude1 == 0 or magnitude2 == 0:
-        return 1.0
-    similarity = dot_product / (magnitude1 * magnitude2)
-    similarity = max(min(similarity, 1.0), -1.0)
-    return 1.0 - similarity
+    dot = sum(a * b for a, b in zip(vec1, vec2))
+    mag1 = math.sqrt(sum(a * a for a in vec1))
+    mag2 = math.sqrt(sum(b * b for b in vec2))
+    if mag1 == 0 or mag2 == 0: return 1.0
+    return 1.0 - (dot / (mag1 * mag2))
 
-def _load_json(file_path):
-    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-        try:
-            with open(file_path, "r", encoding=enc) as f:
-                return json.load(f)
-        except UnicodeDecodeError:
-            continue
-    raise RuntimeError(f"Could not decode {file_path}")
+def _clean_heading(text):
+    """Cleans a heading string so it doesn't break the path delimiter."""
+    if not text: return ""
+    clean = re.sub(r'[>/]', '-', text.strip())
+    return clean[:50].strip()
 
-def _html_to_text(html_content):
-    """Strip HTML tags, scripts, styles, and boilerplate to get clean text."""
-    text = re.sub(r'<(script|style)\b[^>]*>[\s\S]*?</\1>', ' ', html_content, flags=re.IGNORECASE)
-    text = re.sub(r'<(nav|header|footer|svg)\b[^>]*>[\s\S]*?</\1>', ' ', text, flags=re.IGNORECASE)
-    main_match = re.search(r'<main\b[^>]*>([\s\S]*?)</main>', text, flags=re.IGNORECASE)
-    if main_match:
-        text = main_match.group(1)
-    text = re.sub(r'<(p|h[1-6]|li|div|br|tr)\b[^>]*>', '\n\n', text, flags=re.IGNORECASE)
-    text = re.sub(r'</(p|h[1-6]|li|div|tr)>', '\n\n', text, flags=re.IGNORECASE)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = html_lib.unescape(text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    text = re.sub(r'\n\s*\n+', '\n\n', text)
-    return text.strip()
+# ==========================================
+# HTML PARSING
+# ==========================================
+def html_list_to_md(ul_or_ol, level=0):
+    """Recursively converts an HTML list to an indented Markdown list."""
+    md = []
+    for li in ul_or_ol.find_all('li', recursive=False):
+        parts = []
+        for child in li.contents:
+            if getattr(child, 'name', None) in ('ul', 'ol'):
+                continue
+            if isinstance(child, str):
+                parts.append(child.strip())
+            else:
+                parts.append(child.get_text(separator=" ", strip=True))
+        text = " ".join(parts).strip()
+        
+        prefix = "  " * level + "- "
+        md.append(f"{prefix}{text}")
+        
+        for nested in li.find_all(['ul', 'ol'], recursive=False):
+            md.append(html_list_to_md(nested, level + 1))
+    return "\n".join(md)
 
-def extract_json_chunks(file_path, locale, source_prefix, seen_texts):
+def extract_hierarchical_chunks(html_content, base_section):
+    soup = BeautifulSoup(html_content, "html.parser")
+    
+    for tag in soup(["script", "style", "nav", "header", "footer", "svg", "form", "aside", "iframe", "noscript"]):
+        tag.decompose()
+    for el in soup.find_all(True, class_=re.compile(r'(cookie|popup|modal|sidebar|menu|banner|newsletter)', re.I)):
+        el.decompose()
+    for el in soup.find_all(True, id=re.compile(r'(cookie|popup|modal|sidebar|menu|banner|newsletter)', re.I)):
+        el.decompose()
+
+    current_path = [base_section]
     chunks = []
-    try:
-        data = _load_json(file_path)
-    except Exception as e:
-        print(f"Error reading {file_path}: {e}")
-        return chunks
 
-    items = data.items() if isinstance(data, dict) else enumerate(data)
-    for key, val in items:
-        if isinstance(key, str) and key in META_KEYS: continue
-        if not isinstance(val, str): continue
+    title_tag = soup.find('title')
+    meta_desc = soup.find('meta', attrs={'name': 'description'})
+    if title_tag or meta_desc:
+        meta_text = ""
+        if title_tag: meta_text += f"Page Title: {title_tag.get_text(strip=True)}. "
+        if meta_desc: meta_text += f"Description: {meta_desc.get('content', '')}"
+        if len(meta_text) > 10:
+            chunks.append({"text": meta_text.strip(), "section_path": base_section})
+
+    elements = soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol', 'td', 'th', 'blockquote', 'dt', 'dd'])
+
+    for el in elements:
+        if el.name == 'li': continue
+        
+        if el.name in ('ul', 'ol'):
+            text = html_list_to_md(el)
+        else:
+            text = el.get_text(separator=" ", strip=True)
             
-        clean_val = val.strip()
-        if len(clean_val) < 20 or clean_val in seen_texts: continue
+        if not text or len(text) < 20 or text.lower() in ['read more', 'click here', 'learn more']:
+            continue
+
+        if el.name == 'h1':
+            h_text = _clean_heading(text)
+            if h_text: current_path = [base_section, h_text]
+        elif el.name == 'h2':
+            h_text = _clean_heading(text)
+            if h_text: current_path = current_path[:2] + [h_text]
+        elif el.name == 'h3':
+            h_text = _clean_heading(text)
+            if h_text: current_path = current_path[:3] + [h_text]
+        elif el.name == 'h4':
+            h_text = _clean_heading(text)
+            if h_text: current_path = current_path[:4] + [h_text]
+        else:
+            if len(text) > 1500: text = text[:1500] + "..."
+            chunks.append({"text": text, "section_path": " > ".join(current_path)})
             
-        seen_texts.add(clean_val)
-        chunks.append({
-            "locale": locale,
-            "source": f"{source_prefix}:{key}",
-            "chunk_text": clean_val,
-        })
     return chunks
 
-def extract_html_chunks(file_path, source_prefix, seen_texts):
+# ==========================================
+# PDF PARSING (Heuristic)
+# ==========================================
+def is_pdf_heading(line):
+    line = line.strip()
+    if not line or len(line) > 80: return False
+    if line.endswith('.') or line.endswith(','): return False
+    if re.match(r'^\d+(\.\d+)*\s+[A-Z]', line): return True
+    if line.isupper() and len(line.split()) <= 8 and len(line) > 3: return True
+    if line.istitle() and len(line.split()) <= 5: return True
+    return False
+
+def is_pdf_list_item(line):
+    """Detects if a line is a list item and its indentation level."""
+    # Matches standard bullets, numbers, and letters
+    match = re.match(r'^(\s*)([\-\*\u2022\u25AA\u25E6\u2023\u2043\u25A0\u25CF]|\d+[\.\)]|[a-zA-Z][\.\)]|\([a-zA-Z0-9]+\))\s+(.*)$', line)
+    if match:
+        spaces = match.group(1)
+        text = match.group(3)
+        # Calculate indent level (e.g., 2 spaces = 1 level, 4 spaces = 2 levels)
+        level = max(0, len(spaces) // 2)
+        return True, level, text
+    return False, 0, ""
+
+def extract_pdf_chunks(file_path, seen_texts):
     chunks = []
     try:
-        with open(file_path, "r", encoding="utf-8-sig") as f:
-            html_content = f.read()
+        reader = PdfReader(file_path)
+        full_text = "".join(page.extract_text() + "\n" for page in reader.pages)
     except Exception as e:
-        print(f"Error reading {file_path}: {e}")
+        print(f"Error reading PDF {file_path}: {e}")
         return chunks
 
-    text = _html_to_text(html_content)
-    if not text: return chunks
+    doc_name = Path(file_path).stem
+    current_path = [SECTION_TARGET, doc_name]
+    lines = full_text.split('\n')
+    
+    current_block = []
+    is_list_block = False
 
-    blocks = text.split('\n\n')
-    for i, block in enumerate(blocks):
-        clean_val = block.strip()
-        if len(clean_val) < 20 or clean_val in seen_texts: continue
+    def flush_block():
+        nonlocal is_list_block, current_block
+        if not current_block: return
+        
+        # Join lines: preserve newlines if it's a list, else join with spaces
+        text = "\n".join(current_block) if is_list_block else " ".join(current_block)
+        text = re.sub(r'\s+', ' ', text).strip() if not is_list_block else text.strip()
+        
+        if len(text) >= 30 and text not in seen_texts:
+            seen_texts.add(text)
+            if len(text) > 1500: text = text[:1500] + "..."
+            chunks.append({
+                "locale": "en", "scope": SCOPE_TARGET, 
+                "section_path": " > ".join(current_path),
+                "source": f"pdf/{Path(file_path).name}", 
+                "chunk_text": text
+            })
+        current_block.clear()
+        is_list_block = False
+
+    for line in lines:
+        line_str = line.rstrip()
+        line_stripped = line_str.strip()
+        
+        if not line_stripped:
+            flush_block()
+            continue
+
+        # 1. Check if it's a heading
+        if is_pdf_heading(line_stripped):
+            flush_block()
+            h_text = _clean_heading(line_stripped)
+            current_path = [SECTION_TARGET, doc_name, h_text]
+            continue
+
+        # 2. Check if it's a list item
+        is_list, level, text = is_pdf_list_item(line_str)
+        if is_list:
+            if not is_list_block:
+                flush_block()
+                is_list_block = True
             
+            prefix = "  " * level + "- "
+            current_block.append(f"{prefix}{text}")
+        else:
+            # 3. Normal text or continuation of a list item
+            if is_list_block:
+                # Append wrapped text to the last list item
+                if current_block:
+                    current_block[-1] += " " + line_stripped
+            else:
+                current_block.append(line_stripped)
+
+    flush_block()
+    return chunks
+
+# ==========================================
+# URL / JSON
+# ==========================================
+def extract_url_chunks(url, seen_texts):
+    chunks = []
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html_content = response.read().decode('utf-8', errors='replace')
+    except Exception as e:
+        print(f"Error fetching URL {url}: {e}")
+        return chunks
+
+    parsed_chunks = extract_hierarchical_chunks(html_content, SECTION_TARGET)
+    for i, pc in enumerate(parsed_chunks):
+        clean_val = pc["text"]
+        if clean_val in seen_texts: continue
         seen_texts.add(clean_val)
-        suffix = f"#p{i+1}" if len(blocks) > 1 else ""
         chunks.append({
-            "locale": "en",
-            "source": f"{source_prefix}{suffix}",
-            "chunk_text": clean_val,
+            "locale": "en", "scope": SCOPE_TARGET, "section_path": pc["section_path"],
+            "source": f"url/{url}#chunk{i+1}", "chunk_text": clean_val
         })
     return chunks
 
 def collect_chunks(seen_texts):
     chunks = []
-    
-    if DO_JSON:
-        print("Scanning main JSON files...")
-        for locale in LOCALES:
-            lang_dir = LOCALES_DIR / locale
-            if lang_dir.exists():
-                for json_file in lang_dir.rglob("*.json"):
-                    rel_path = json_file.relative_to(LOCALES_DIR).as_posix()
-                    chunks.extend(extract_json_chunks(json_file, locale, f"json/{rel_path}", seen_texts))
-
-    if DO_EXTRA:
-        if EXTRA_DATA_DIR.exists():
-            print(f"Scanning extra data folder: {EXTRA_DATA_DIR}")
-            for json_file in EXTRA_DATA_DIR.rglob("*.json"):
-                chunks.extend(extract_json_chunks(json_file, "en", f"extra_data/{json_file.name}", seen_texts))
-        else:
-            print("No extra_data folder found.")
-
-    if DO_HTML:
-        if PUBLIC_DIR.exists():
-            print(f"Scanning public HTML folder: {PUBLIC_DIR}")
-            folders_to_scrape = [
-                PUBLIC_DIR,
-                PUBLIC_DIR / "blogs",
-                PUBLIC_DIR / "legals",
-                PUBLIC_DIR / "agency-reviews",
-                PUBLIC_DIR / "client-reviews",
-            ]
-            for folder in folders_to_scrape:
-                if not folder.exists(): continue
-                for html_file in folder.glob("*.html"):
-                    rel_path = html_file.relative_to(PUBLIC_DIR).as_posix()
-                    chunks.extend(extract_html_chunks(html_file, f"html/{rel_path}", seen_texts))
-
+    if SOURCE == "json" and LOCALES_DIR.exists():
+        for json_file in (LOCALES_DIR / "en").rglob("*.json"):
+            data = json.loads(json_file.read_text(encoding="utf-8-sig"))
+            for k, v in data.items():
+                if k in META_KEYS or not isinstance(v, str) or len(v.strip()) < 20 or v in seen_texts: continue
+                seen_texts.add(v)
+                chunks.append({
+                    "locale": "en", "scope": SCOPE_TARGET, "section_path": SECTION_TARGET,
+                    "source": f"json/{json_file.name}:{k}", "chunk_text": v.strip()
+                })
+                
+    elif SOURCE == "html" and PUBLIC_DIR.exists():
+        for html_file in PUBLIC_DIR.glob("*.html"):
+            html_content = html_file.read_text(encoding="utf-8-sig")
+            parsed_chunks = extract_hierarchical_chunks(html_content, SECTION_TARGET)
+            for i, pc in enumerate(parsed_chunks):
+                clean_val = pc["text"]
+                if clean_val in seen_texts: continue
+                seen_texts.add(clean_val)
+                chunks.append({
+                    "locale": "en", "scope": SCOPE_TARGET, "section_path": pc["section_path"],
+                    "source": f"html/{html_file.name}#chunk{i+1}", "chunk_text": clean_val
+                })
+                
+    elif SOURCE == "pdf" and TARGET:
+        chunks.extend(extract_pdf_chunks(TARGET, seen_texts))
+    elif SOURCE == "url" and TARGET:
+        chunks.extend(extract_url_chunks(TARGET, seen_texts))
+    else:
+        print(f"Invalid source '{SOURCE}' or missing target.")
     return chunks
 
-
 def main():
-    if not os.environ.get("DATABASE_URL"):
-        print("Error: DATABASE_URL must be set in your environment or .env file.")
+    try:
+        _, api_key, _ = get_tenant_config(INSTANCE_ID)
+    except ValueError as e:
+        print(f"Error: {e}")
         return
 
-    print(f"Starting ingestion (JSON: {DO_JSON}, HTML: {DO_HTML}, EXTRA: {DO_EXTRA})...")
-    print("Verifying Gemini embedding API...")
+    print(f"Starting ingestion for {INSTANCE_ID} (Source: {SOURCE}, Scope: {SCOPE_TARGET}, Root Section: {SECTION_TARGET}, Refresh: {REFRESH_MODE})...")
     try:
-        test_vec = embed_document("Health check.")
-        print(f"  OK - got {len(test_vec)}-dim vector.\n")
+        embed_document("Health check.", api_key)
+        print("  Gemini API OK.\n")
     except Exception as e:
         print(f"  FAILED: {e}")
-        print("  Aborting.")
         return
 
-    conn = get_conn()
+    conn = get_conn(INSTANCE_ID)
     cur = conn.cursor()
 
-    # --- Fetch existing chunks AND embeddings safely ---
-    print("Fetching existing text and embeddings from database...")
+    if REFRESH_MODE:
+        print("Refresh mode enabled. Deleting old chunks for this source...")
+        if SOURCE == "url" and TARGET:
+            cur.execute("DELETE FROM site_content WHERE section_path LIKE %s AND source LIKE %s", (f"{SECTION_TARGET}%", f"url/{TARGET}%"))
+        elif SOURCE == "pdf" and TARGET:
+            filename = os.path.basename(TARGET)
+            cur.execute("DELETE FROM site_content WHERE section_path LIKE %s AND source LIKE %s", (f"{SECTION_TARGET}%", f"pdf/{filename}%"))
+        elif SOURCE == "html":
+            cur.execute("DELETE FROM site_content WHERE section_path LIKE %s AND source LIKE 'html/%'", (f"{SECTION_TARGET}%",))
+        elif SOURCE == "json":
+            cur.execute("DELETE FROM site_content WHERE section_path LIKE %s AND source LIKE 'json/%'", (f"{SECTION_TARGET}%",))
+        conn.commit()
+        print(f"  Deleted existing chunks for {TARGET or SOURCE}.")
+
     cur.execute("SELECT chunk_text, embedding::text FROM site_content")
-    existing_rows = cur.fetchall()
-    
     seen_texts = set()
     seen_embeddings = []
-
-    for row in existing_rows:
-        text = row['chunk_text']
-        seen_texts.add(text)
-        
-        emb_str = row['embedding']
-        if emb_str:
-            # Parse the pgvector string "[0.1, 0.2, ...]" into a Python list of floats
-            emb_vec = [float(x) for x in emb_str.strip('[]').split(',')]
-            seen_embeddings.append((emb_vec, "existing_db", text))
-
-    print(f"Loaded {len(seen_texts)} existing texts and {len(seen_embeddings)} embeddings.\n")
+    for row in cur.fetchall():
+        seen_texts.add(row['chunk_text'])
+        if row['embedding']:
+            seen_embeddings.append(([float(x) for x in row['embedding'].strip('[]').split(',')], "db", row['chunk_text']))
 
     chunks = collect_chunks(seen_texts)
-    print(f"\nFound {len(chunks)} NEW chunks to ingest.")
-    print("Generating embeddings and performing semantic deduplication...\n")
+    print(f"Found {len(chunks)} NEW chunks to ingest.\n")
 
-    if len(chunks) == 0:
+    if not chunks:
         print("No new chunks to add. Exiting.")
         cur.close()
         conn.close()
         return
 
     inserted = 0
-    skipped_semantic = 0
-    failed = 0
-    consecutive_failures = 0
-    MAX_CONSECUTIVE_FAILURES = 5
-
     for i, chunk in enumerate(chunks):
         try:
-            print(f"  -> Embedding: {chunk['source']}")
-            vector = embed_document(chunk["chunk_text"])
+            print(f"  -> Embedding: {chunk['source']} [{chunk['section_path']}]")
+            vector = embed_document(chunk["chunk_text"], api_key)
 
-            is_duplicate = False
-            # Check against ALL previously seen embeddings (from DB and this run)
-            for existing_vec, existing_source, existing_text in seen_embeddings:
-                if cosine_distance(vector, existing_vec) < SEMANTIC_DISTANCE_THRESHOLD:
-                    print(f"     [SKIP] Semantic duplicate of {existing_source}")
-                    print(f"            New: '{chunk['chunk_text'][:60]}...'")
-                    is_duplicate = True
-                    break
-
-            if is_duplicate:
-                skipped_semantic += 1
+            if any(cosine_distance(vector, vec) < SEMANTIC_DISTANCE_THRESHOLD for vec, _, _ in seen_embeddings):
+                print(f"     [SKIP] Semantic duplicate.")
                 continue
 
-            vec_str = to_vector_literal(vector)
-
             cur.execute("""
-                INSERT INTO site_content (locale, source, chunk_text, embedding)
-                VALUES (%s, %s, %s, %s::vector)
-            """, (chunk["locale"], chunk["source"], chunk["chunk_text"], vec_str))
-
+                INSERT INTO site_content (locale, scope, section_path, source, chunk_text, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s::vector)
+            """, (
+                chunk["locale"], chunk["scope"], chunk["section_path"], 
+                chunk["source"], chunk["chunk_text"], to_vector_literal(vector)
+            ))
             conn.commit()
             seen_embeddings.append((vector, chunk["source"], chunk["chunk_text"]))
             inserted += 1
-            consecutive_failures = 0
-
         except Exception as e:
             print(f"  Error processing {chunk['source']}: {e}")
             conn.rollback()
-            failed += 1
-            consecutive_failures += 1
-            
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                print(f"\nAborting: {MAX_CONSECUTIVE_FAILURES} consecutive failures.")
-                break
 
     cur.close()
     conn.close()
-
-    print("\n=== Ingestion Summary ===")
-    print(f"New chunks found        : {len(chunks)}")
-    print(f"Inserted into database  : {inserted}")
-    print(f"Skipped (Semantic Dupes): {skipped_semantic}")
-    print(f"Failed                  : {failed}")
-    print("=========================")
-
+    print(f"\n=== Summary: {inserted} inserted, {len(chunks)-inserted} skipped/failed ===")
 
 if __name__ == "__main__":
     main()

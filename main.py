@@ -1,25 +1,13 @@
 import os
 from flask import Flask, jsonify
 from flask_cors import CORS
-
 from ask_ai import bp as ask_ai_bp
 
 def create_app():
     app = Flask(__name__)
-    
-    CORS(app, resources={
-        r"/api/*": {
-            "origins": [
-                "https://lead-wise-ai.com",
-                "https://www.lead-wise-ai.com",
-                "https://lead-wise-ai-com.onrender.com",
-                "http://localhost:8080",
-                "http://127.0.0.1:8080",
-                "http://localhost:3000"
-            ]
-        }
-    })
-
+    # Broad CORS to allow requests from any tenant domain. 
+    # Security is enforced per-request in ask_ai.py based on allowed_origins.
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
     app.register_blueprint(ask_ai_bp)
 
     @app.get("/health")

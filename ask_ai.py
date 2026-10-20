@@ -1,241 +1,251 @@
 """
 ask_ai.py
-Handles POST /api/ask-ai securely.
+Handles POST /api/ask-ai/<instance_id> securely with CORS enforcement.
 """
 import os
 import re
 import uuid
 import hashlib
-import json
 import time
 from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
-from db import get_conn, read_view
+from db import get_conn, read_view, execute_write, get_tenant_config
 from gemini import embed_query, generate_answer
 
 bp = Blueprint("ask_ai", __name__)
-
 CONTACT_LOG_IP_SALT = os.environ.get("CONTACT_LOG_IP_SALT", "")
-
 MAX_QUESTION_LEN = 500
-SIMILARITY_CUTOFF = 0.72  # Lowered to catch more relevant chunks
+SIMILARITY_CUTOFF = 0.72
 
-# Fallbacks
 DEFAULT_RATE_LIMIT_MAX = 25
 DEFAULT_RATE_LIMIT_WINDOW = 60
 DEFAULT_CHUNK_LIMIT = 10
 
-# --- Settings Cache ---
-_settings_cache = {
-    "data": None,
-    "timestamp": 0
-}
-CACHE_TTL_SECONDS = 300
+_settings_cache = {}
 
-def get_settings():
+def get_settings(instance_id):
     now = time.time()
-    if _settings_cache["data"] and (now - _settings_cache["timestamp"] < CACHE_TTL_SECONDS):
-        return _settings_cache["data"]
+    if instance_id in _settings_cache:
+        cache = _settings_cache[instance_id]
+        if cache["data"] and (now - cache["timestamp"] < 300):
+            return cache["data"]
 
-    settings = {
-        "rate_limit_max": DEFAULT_RATE_LIMIT_MAX,
-        "rate_limit_window": DEFAULT_RATE_LIMIT_WINDOW,
-        "chunk_limit": DEFAULT_CHUNK_LIMIT
-    }
-    
+    settings = {"rate_limit_max": DEFAULT_RATE_LIMIT_MAX, "rate_limit_window": DEFAULT_RATE_LIMIT_WINDOW, "chunk_limit": DEFAULT_CHUNK_LIMIT}
     try:
-        conn = get_conn()
+        conn = get_conn(instance_id)
         try:
             rows = read_view(conn, """
-                SELECT setting_key, setting_value 
-                FROM active_settings 
+                SELECT setting_key, setting_value FROM active_settings 
                 WHERE setting_key IN ('ask_ai_rate_limit_max', 'ask_ai_rate_limit_window_minutes', 'ask_ai_chunk_limit')
             """)
             db_settings = {row['setting_key']: int(row['setting_value']) for row in rows}
-            
-            if 'ask_ai_rate_limit_max' in db_settings:
-                settings['rate_limit_max'] = db_settings['ask_ai_rate_limit_max']
-            if 'ask_ai_rate_limit_window_minutes' in db_settings:
-                settings['rate_limit_window'] = db_settings['ask_ai_rate_limit_window_minutes']
-            if 'ask_ai_chunk_limit' in db_settings:
-                settings['chunk_limit'] = db_settings['ask_ai_chunk_limit']
+            if 'ask_ai_rate_limit_max' in db_settings: settings['rate_limit_max'] = db_settings['ask_ai_rate_limit_max']
+            if 'ask_ai_rate_limit_window_minutes' in db_settings: settings['rate_limit_window'] = db_settings['ask_ai_rate_limit_window_minutes']
+            if 'ask_ai_chunk_limit' in db_settings: settings['chunk_limit'] = db_settings['ask_ai_chunk_limit']
         finally:
             conn.close()
     except Exception as e:
-        print(f"[Ask AI] Failed to fetch settings from DB: {e}")
+        print(f"[Ask AI] Failed to fetch settings for {instance_id}: {e}")
 
-    _settings_cache["data"] = settings
-    _settings_cache["timestamp"] = now
+    _settings_cache[instance_id] = {"data": settings, "timestamp": now}
     return settings
 
 def _hash_ip(ip):
     if not ip: return "unknown"
     return hashlib.sha256((ip + CONTACT_LOG_IP_SALT).encode()).hexdigest()
 
-@bp.route("/api/ask-ai", methods=["POST"])
-def ask_ai():
+@bp.route("/api/ask-ai/<instance_id>/config", methods=["GET"])
+def get_public_config(instance_id):
+    """Lightweight endpoint for the frontend to fetch UI settings."""
+    try:
+        config = get_tenant_config(instance_id)
+        return jsonify({"brand_color": config.get("brand_color", "#2BB673")}), 200
+    except ValueError:
+        return jsonify({"error": "Invalid instance ID"}), 404
+
+@bp.route("/api/ask-ai/<instance_id>", methods=["POST"])
+def ask_ai(instance_id):
+    try:
+        config = get_tenant_config(instance_id)
+        
+        # --- CORS ORIGIN ENFORCEMENT ---
+        allowed_origins = config.get("allowed_origins")
+        if allowed_origins:
+            origin = request.headers.get("Origin") or request.headers.get("Referer", "")
+            allowed_list = [o.strip() for o in allowed_origins.split(",")]
+            is_allowed = any(origin.startswith(allowed) for allowed in allowed_list)
+            if not is_allowed:
+                print(f"[Ask AI] Blocked unauthorized origin: {origin}")
+                return jsonify({"error": "Unauthorized domain"}), 403
+        # -------------------------------
+
+        api_key = config["gemini_api_key"]
+        instance_type = config["instance_type"]
+        scope = 'public' if instance_type == 'public' else 'internal'
+        
+    except ValueError:
+        return jsonify({"error": "Invalid instance ID"}), 404
+
     data = request.get_json(silent=True) or {}
-    
-    question = str(data.get("question", "")).strip()
-    question = re.sub(r'<[^>]+>', '', question) 
-    
+    question = re.sub(r'<[^>]+>', '', str(data.get("question", "")).strip())
     raw_locale = data.get("locale", "en")
     locale = raw_locale[:2].lower() if raw_locale else "en"
-    session_id = data.get("session_id", "")
+    
+    # --- FIX: Convert empty string to None for UUID column ---
+    session_id = data.get("session_id") or None
+    section_path = data.get("section_path") 
 
-    if not question or len(question) < 2:
+    if not question or len(question) < 2: 
         return jsonify({"error": "Question is required"}), 400
-    if len(question) > MAX_QUESTION_LEN:
+    if len(question) > MAX_QUESTION_LEN: 
         return jsonify({"error": "Question too long"}), 400
+
+    if question == "/start":
+        options = []
+        try:
+            conn = get_conn(instance_id)
+            try:
+                rows = read_view(conn, """
+                    SELECT DISTINCT split_part(section_path, ' > ', 1) AS root_section 
+                    FROM site_content 
+                    WHERE scope = %s AND section_path IS NOT NULL
+                """, (scope,))
+                
+                for r in rows:
+                    sec = r["root_section"]
+                    if sec: options.append({"id": sec, "en": sec})
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[Ask AI] Failed to fetch sections: {e}")
+            
+        if not options:
+            options = [{"id": "General", "en": "General Questions"}]
+
+        return jsonify({
+            "answer": "Welcome! Which area can I help you with today?",
+            "type": "radio",
+            "options": options
+        }), 200
+
+    if question == section_path:
+        return jsonify({
+            "answer": f"Great. What would you like to know about {section_path}?",
+            "type": "text"
+        }), 200
 
     submission_id = str(uuid.uuid4())
     ip = request.headers.get("CF-Connecting-IP") or request.remote_addr
     ip_hash = _hash_ip(ip)
-
-    print(f"[Ask AI] [{submission_id[:8]}] Received query: '{question[:50]}...' (locale: {locale})")
 
     status = "success"
     context_text = ""
     chunks_found = 0
     history_rows = []
 
-    settings = get_settings()
-    rate_limit_max = settings['rate_limit_max']
-    rate_limit_window = settings['rate_limit_window']
-    chunk_limit = settings['chunk_limit']
+    settings = get_settings(instance_id)
+    rate_limit_max, rate_limit_window, chunk_limit = settings['rate_limit_max'], settings['rate_limit_window'], settings['chunk_limit']
 
     # Rate Limiting
     try:
-        conn = get_conn()
+        conn = get_conn(instance_id)
         try:
             cutoff = datetime.utcnow() - timedelta(minutes=rate_limit_window)
-            row = read_view(conn,
-                "SELECT count(*) FROM ask_ai_log WHERE ip_hash = %s AND submitted_at > %s",
-                (ip_hash, cutoff), one=True
-            )
-            count = row["count"]
-            if count >= rate_limit_max:
-                print(f"[Ask AI] [{submission_id[:8]}] Rate limit exceeded ({count}/{rate_limit_max} per {rate_limit_window}m)")
-                return jsonify({"error": "You have reached the limit for AI questions. Please try again later.", "submission_id": submission_id}), 429
-        finally:
-            conn.close()
-    except Exception as e:
-        print(f"[Ask AI] [{submission_id[:8]}] Rate limit check failed: {e}")
+            row = read_view(conn, "SELECT count(*) FROM ask_ai_log WHERE ip_hash = %s AND submitted_at > %s", (ip_hash, cutoff), one=True)
+            if row["count"] >= rate_limit_max:
+                return jsonify({"error": "You have reached the limit for AI questions."}), 429
+        finally: conn.close()
+    except Exception as e: print(f"[Ask AI] Rate limit check failed: {e}")
 
     # Session History
     if session_id:
         try:
-            conn = get_conn()
+            conn = get_conn(instance_id)
             try:
-                history_rows = read_view(conn,
-                    "SELECT question, answer FROM ask_ai_log "
-                    "WHERE session_id = %s AND ip_hash = %s AND status = 'success' "
-                    "ORDER BY submitted_at DESC LIMIT 3",
-                    (session_id, ip_hash)
-                )
+                history_rows = read_view(conn, "SELECT question, answer FROM ask_ai_log WHERE session_id = %s AND ip_hash = %s AND status = 'success' ORDER BY submitted_at DESC LIMIT 3", (session_id, ip_hash))
                 history_rows = history_rows[::-1]
-                print(f"[Ask AI] [{submission_id[:8]}] Fetched {len(history_rows)} history messages.")
-            finally:
-                conn.close()
-        except Exception as e:
-            print(f"[Ask AI] [{submission_id[:8]}] Failed to fetch history: {e}")
+            finally: conn.close()
+        except Exception: pass
 
     # Small Talk Bypass
     lower_q = question.lower().strip("!.,? ")
     is_small_talk = False
     if len(lower_q.split()) <= 4:
         fillers = ["hi", "hello", "hey", "thanks", "thank you", "my name is", "i am", "i'm", "ok", "okay"]
-        if any(lower_q.startswith(f) for f in fillers):
-            is_small_talk = True
+        if any(lower_q.startswith(f) for f in fillers): is_small_talk = True
             
     if is_small_talk:
-        print(f"[Ask AI] [{submission_id[:8]}] Detected small talk. Bypassing DB search.")
         context_text = "No database context needed for this conversational response."
     else:
-        # Embed and Retrieve
         try:
-            print(f"[Ask AI] [{submission_id[:8]}] Embedding query...")
             embed_text = question
             if history_rows and len(question.split()) < 6:
                 embed_text = f"{history_rows[-1]['question']} {question}"
-                print(f"[Ask AI] [{submission_id[:8]}] Augmented embed text: '{embed_text}'")
-                
-            vec = embed_query(embed_text)
+            vec = embed_query(embed_text, api_key)
             vec_str = "[" + ",".join(f"{v:.8f}" for v in vec) + "]"
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                print(f"[Ask AI] [{submission_id[:8]}] Embed failed: Gemini Quota Exceeded (429).")
-                status = "embed_error_quota"
-                return jsonify({"error": "The AI is currently resting. Please try again later.", "submission_id": submission_id}), 503
-            
-            print(f"[Ask AI] [{submission_id[:8]}] Embed failed: {error_msg}")
-            status = "embed_error"
-            return jsonify({"error": "Processing failed", "submission_id": submission_id}), 500
+            return jsonify({"error": "Processing failed"}), 500
 
         try:
-            print(f"[Ask AI] [{submission_id[:8]}] Searching database for context (limit: {chunk_limit})...")
-            conn = get_conn()
+            conn = get_conn(instance_id)
             try:
-                query_primary = f"""
-                    SELECT chunk_text, embedding <=> %s::vector AS dist 
-                    FROM site_content WHERE locale = %s 
-                    ORDER BY dist LIMIT {int(chunk_limit)}
-                """
-                rows = read_view(conn, query_primary, (vec_str, locale))
+                if section_path:
+                    query = f"""
+                        SELECT chunk_text, embedding <=> %s::vector AS dist 
+                        FROM site_content 
+                        WHERE locale = %s AND scope = %s AND section_path LIKE %s
+                        ORDER BY dist LIMIT {int(chunk_limit)}
+                    """
+                    rows = read_view(conn, query, (vec_str, locale, scope, f"{section_path}%"))
+                else:
+                    query = f"""
+                        SELECT chunk_text, embedding <=> %s::vector AS dist 
+                        FROM site_content 
+                        WHERE locale = %s AND scope = %s
+                        ORDER BY dist LIMIT {int(chunk_limit)}
+                    """
+                    rows = read_view(conn, query, (vec_str, locale, scope))
+                
                 rows = [r for r in rows if r["dist"] < SIMILARITY_CUTOFF]
                 
                 if not rows and locale != "en":
-                    print(f"[Ask AI] [{submission_id[:8]}] No local matches, falling back to 'en'...")
-                    query_fallback = f"""
-                        SELECT chunk_text, embedding <=> %s::vector AS dist 
-                        FROM site_content WHERE locale = 'en' 
-                        ORDER BY dist LIMIT {int(chunk_limit)}
-                    """
-                    rows = read_view(conn, query_fallback, (vec_str,))
+                    if section_path:
+                        query = f"SELECT chunk_text, embedding <=> %s::vector AS dist FROM site_content WHERE locale = 'en' AND scope = %s AND section_path LIKE %s ORDER BY dist LIMIT {int(chunk_limit)}"
+                        rows = read_view(conn, query, (vec_str, scope, f"{section_path}%"))
+                    else:
+                        query = f"SELECT chunk_text, embedding <=> %s::vector AS dist FROM site_content WHERE locale = 'en' AND scope = %s ORDER BY dist LIMIT {int(chunk_limit)}"
+                        rows = read_view(conn, query, (vec_str, scope))
                     rows = [r for r in rows if r["dist"] < SIMILARITY_CUTOFF]
                 
                 chunks_found = len(rows)
                 context_text = "\n\n---\n\n".join(r["chunk_text"] for r in rows)
-                print(f"[Ask AI] [{submission_id[:8]}] Found {chunks_found} relevant chunks.")
-            finally:
+            finally: 
                 conn.close()
-        except Exception as e:
-            print(f"[Ask AI] [{submission_id[:8]}] DB retrieve error: {e}")
+        except Exception as e: 
             status = "db_error"
 
-    # Generate Answer
     if not context_text.strip():
-        print(f"[Ask AI] [{submission_id[:8]}] No context found. Using fallback message.")
-        answer = "I don't have that information, but you can contact us at contact@lead-wise-ai.com"
-        if not is_small_talk:
-            status = "no_context"
+        answer = "I don't have that information, but you can contact us directly."
+        if not is_small_talk: status = "no_context"
     else:
-        print(f"[Ask AI] [{submission_id[:8]}] Generating answer via Gemini...")
         try:
-            answer = generate_answer(question, context_text, history_rows)
-            if "having trouble answering" in answer:
-                status = "gen_error"
-            elif "I don't have that information" in answer and not is_small_talk:
-                status = "unanswered"
-        except Exception as e:
-            print(f"[Ask AI] [{submission_id[:8]}] Gen error: {e}")
+            answer = generate_answer(question, context_text, api_key, history_rows)
+            if "having trouble answering" in answer: status = "gen_error"
+            elif "I don't have that information" in answer and not is_small_talk: status = "unanswered"
+        except Exception:
             status = "gen_error"
             answer = "Sorry, I am having trouble answering right now."
 
-    # Log the interaction (Write, so base table)
+    # Log using execute_write wrapper
     try:
-        conn = get_conn()
+        conn = get_conn(instance_id)
         try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO ask_ai_log (submission_id, session_id, question, answer, locale, ip_hash, status, chunks_found)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (submission_id, session_id, question, answer, locale, ip_hash, status, chunks_found))
-            conn.commit()
-        finally:
+            execute_write(conn, """
+                INSERT INTO ask_ai_log (submission_id, session_id, question, answer, locale, ip_hash, status, chunks_found)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (submission_id, session_id, question, answer, locale, ip_hash, status, chunks_found))
+        finally: 
             conn.close()
-    except Exception as e:
-        print(f"[Ask AI] [{submission_id[:8]}] DB log error: {e}")
+    except Exception: pass
 
     return jsonify({"answer": answer, "submission_id": submission_id})
