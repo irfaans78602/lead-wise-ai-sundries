@@ -1,6 +1,7 @@
 """
 db.py
 Connection helper for Master DB and Tenant DBs.
+Includes advanced production logging for Render.com.
 """
 import env  # noqa: F401
 import os
@@ -88,9 +89,6 @@ def get_master_conn():
         raise
 
 def get_tenant_config(instance_id):
-    """
-    Fetch the full config dict (DB string, API key, type, origins, brand_color).
-    """
     conn = get_master_conn()
     try:
         row = read_view(

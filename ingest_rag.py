@@ -1,7 +1,6 @@
 """
 ingest_rag.py
 Generic ingestion pipeline (JSON, HTML, PDF, Web URL).
-Implements 80/20 HTML and PDF parsing, including nested Markdown lists.
 """
 import os
 import sys
@@ -19,14 +18,12 @@ from db import get_conn, get_tenant_config
 
 if len(sys.argv) < 3:
     print("Usage: python ingest_rag.py <instance_id> <source> [path_or_url] --scope <public|internal> --section <root_name> [--refresh]")
-    print("Sources: json, html, pdf, url")
     sys.exit(1)
 
 INSTANCE_ID = sys.argv[1]
 SOURCE = sys.argv[2].lower()
 TARGET = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else None
 
-# --- Strict Argument Parsing ---
 SCOPE_TARGET = None
 SECTION_TARGET = None
 REFRESH_MODE = "--refresh" in sys.argv
@@ -49,8 +46,17 @@ if not SECTION_TARGET:
     print("WARNING: No --section specified. Defaulting to 'General'.")
     SECTION_TARGET = "General"
 
-BASE_DIR = Path(__file__).parent
-SITE_REPO = Path(r"C:\Irfaan\leadwiseai\lead-wise-ai.com") 
+# --- STRICT ENVIRONMENT VARIABLE CHECK ---
+REPO_PATH = os.environ.get("LW_SITE_REPO")
+if not REPO_PATH:
+    print("ERROR: LW_SITE_REPO environment variable is not set.")
+    print("Please set it in your .env file or PowerShell session.")
+    sys.exit(1)
+
+SITE_REPO = Path(REPO_PATH).resolve()
+if not SITE_REPO.exists():
+    print(f"ERROR: LW_SITE_REPO path does not exist: {SITE_REPO}")
+    sys.exit(1)
 
 LOCALES_DIR = SITE_REPO / "src" / "data" / "locales"
 PUBLIC_DIR = SITE_REPO / "public"
@@ -68,7 +74,6 @@ def cosine_distance(vec1, vec2):
     return 1.0 - (dot / (mag1 * mag2))
 
 def _clean_heading(text):
-    """Cleans a heading string so it doesn't break the path delimiter."""
     if not text: return ""
     clean = re.sub(r'[>/]', '-', text.strip())
     return clean[:50].strip()
@@ -77,7 +82,6 @@ def _clean_heading(text):
 # HTML PARSING
 # ==========================================
 def html_list_to_md(ul_or_ol, level=0):
-    """Recursively converts an HTML list to an indented Markdown list."""
     md = []
     for li in ul_or_ol.find_all('li', recursive=False):
         parts = []
@@ -89,17 +93,14 @@ def html_list_to_md(ul_or_ol, level=0):
             else:
                 parts.append(child.get_text(separator=" ", strip=True))
         text = " ".join(parts).strip()
-        
         prefix = "  " * level + "- "
         md.append(f"{prefix}{text}")
-        
         for nested in li.find_all(['ul', 'ol'], recursive=False):
             md.append(html_list_to_md(nested, level + 1))
     return "\n".join(md)
 
 def extract_hierarchical_chunks(html_content, base_section):
     soup = BeautifulSoup(html_content, "html.parser")
-    
     for tag in soup(["script", "style", "nav", "header", "footer", "svg", "form", "aside", "iframe", "noscript"]):
         tag.decompose()
     for el in soup.find_all(True, class_=re.compile(r'(cookie|popup|modal|sidebar|menu|banner|newsletter)', re.I)):
@@ -123,7 +124,6 @@ def extract_hierarchical_chunks(html_content, base_section):
 
     for el in elements:
         if el.name == 'li': continue
-        
         if el.name in ('ul', 'ol'):
             text = html_list_to_md(el)
         else:
@@ -147,11 +147,10 @@ def extract_hierarchical_chunks(html_content, base_section):
         else:
             if len(text) > 1500: text = text[:1500] + "..."
             chunks.append({"text": text, "section_path": " > ".join(current_path)})
-            
     return chunks
 
 # ==========================================
-# PDF PARSING (Heuristic)
+# PDF PARSING
 # ==========================================
 def is_pdf_heading(line):
     line = line.strip()
@@ -163,13 +162,10 @@ def is_pdf_heading(line):
     return False
 
 def is_pdf_list_item(line):
-    """Detects if a line is a list item and its indentation level."""
-    # Matches standard bullets, numbers, and letters
     match = re.match(r'^(\s*)([\-\*\u2022\u25AA\u25E6\u2023\u2043\u25A0\u25CF]|\d+[\.\)]|[a-zA-Z][\.\)]|\([a-zA-Z0-9]+\))\s+(.*)$', line)
     if match:
         spaces = match.group(1)
         text = match.group(3)
-        # Calculate indent level (e.g., 2 spaces = 1 level, 4 spaces = 2 levels)
         level = max(0, len(spaces) // 2)
         return True, level, text
     return False, 0, ""
@@ -193,11 +189,8 @@ def extract_pdf_chunks(file_path, seen_texts):
     def flush_block():
         nonlocal is_list_block, current_block
         if not current_block: return
-        
-        # Join lines: preserve newlines if it's a list, else join with spaces
         text = "\n".join(current_block) if is_list_block else " ".join(current_block)
         text = re.sub(r'\s+', ' ', text).strip() if not is_list_block else text.strip()
-        
         if len(text) >= 30 and text not in seen_texts:
             seen_texts.add(text)
             if len(text) > 1500: text = text[:1500] + "..."
@@ -213,31 +206,25 @@ def extract_pdf_chunks(file_path, seen_texts):
     for line in lines:
         line_str = line.rstrip()
         line_stripped = line_str.strip()
-        
         if not line_stripped:
             flush_block()
             continue
 
-        # 1. Check if it's a heading
         if is_pdf_heading(line_stripped):
             flush_block()
             h_text = _clean_heading(line_stripped)
             current_path = [SECTION_TARGET, doc_name, h_text]
             continue
 
-        # 2. Check if it's a list item
         is_list, level, text = is_pdf_list_item(line_str)
         if is_list:
             if not is_list_block:
                 flush_block()
                 is_list_block = True
-            
             prefix = "  " * level + "- "
             current_block.append(f"{prefix}{text}")
         else:
-            # 3. Normal text or continuation of a list item
             if is_list_block:
-                # Append wrapped text to the last list item
                 if current_block:
                     current_block[-1] += " " + line_stripped
             else:
@@ -282,7 +269,6 @@ def collect_chunks(seen_texts):
                     "locale": "en", "scope": SCOPE_TARGET, "section_path": SECTION_TARGET,
                     "source": f"json/{json_file.name}:{k}", "chunk_text": v.strip()
                 })
-                
     elif SOURCE == "html" and PUBLIC_DIR.exists():
         for html_file in PUBLIC_DIR.glob("*.html"):
             html_content = html_file.read_text(encoding="utf-8-sig")
@@ -295,7 +281,6 @@ def collect_chunks(seen_texts):
                     "locale": "en", "scope": SCOPE_TARGET, "section_path": pc["section_path"],
                     "source": f"html/{html_file.name}#chunk{i+1}", "chunk_text": clean_val
                 })
-                
     elif SOURCE == "pdf" and TARGET:
         chunks.extend(extract_pdf_chunks(TARGET, seen_texts))
     elif SOURCE == "url" and TARGET:
@@ -306,7 +291,8 @@ def collect_chunks(seen_texts):
 
 def main():
     try:
-        _, api_key, _ = get_tenant_config(INSTANCE_ID)
+        config = get_tenant_config(INSTANCE_ID)
+        api_key = config["gemini_api_key"]
     except ValueError as e:
         print(f"Error: {e}")
         return

@@ -8,6 +8,7 @@ import uuid
 import hashlib
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify
 from db import get_conn, read_view, execute_write, get_tenant_config
 from gemini import embed_query, generate_answer
@@ -59,7 +60,7 @@ def get_public_config(instance_id):
     """Lightweight endpoint for the frontend to fetch UI settings."""
     try:
         config = get_tenant_config(instance_id)
-        return jsonify({"brand_color": config.get("brand_color", "#2BB673")}), 200
+        return jsonify({"brand_color": config.get("brand_color", "#3B82F6")}), 200
     except ValueError:
         return jsonify({"error": "Invalid instance ID"}), 404
 
@@ -68,15 +69,28 @@ def ask_ai(instance_id):
     try:
         config = get_tenant_config(instance_id)
         
-        # --- CORS ORIGIN ENFORCEMENT ---
-        allowed_origins = config.get("allowed_origins")
-        if allowed_origins:
-            origin = request.headers.get("Origin") or request.headers.get("Referer", "")
-            allowed_list = [o.strip() for o in allowed_origins.split(",")]
-            is_allowed = any(origin.startswith(allowed) for allowed in allowed_list)
-            if not is_allowed:
-                print(f"[Ask AI] Blocked unauthorized origin: {origin}")
-                return jsonify({"error": "Unauthorized domain"}), 403
+        # --- STRICT CORS ORIGIN ENFORCEMENT ---
+        allowed_origins_str = config.get("allowed_origins")
+        if allowed_origins_str:
+            # 1. Clean allowed list: remove empty strings (trailing commas), strip whitespace, lowercase
+            allowed_list = [o.strip().lower() for o in allowed_origins_str.split(",") if o.strip()]
+            
+            # 2. Get the request origin (Origin header is standard, Referer is fallback)
+            raw_origin = request.headers.get("Origin") or request.headers.get("Referer", "")
+            
+            if raw_origin:
+                # 3. Parse the URL to extract just the base (e.g., "https://acme.com")
+                # This prevents "https://acme.com.evil.net" from matching "https://acme.com"
+                parsed = urlparse(raw_origin)
+                origin_base = f"{parsed.scheme}://{parsed.netloc}".lower()
+                
+                if origin_base not in allowed_list:
+                    print(f"[Ask AI] Blocked unauthorized origin: {origin_base}")
+                    return jsonify({"error": "Unauthorized domain"}), 403
+            else:
+                # If there is no Origin or Referer header, block the request.
+                print(f"[Ask AI] Blocked request with missing Origin/Referer header")
+                return jsonify({"error": "Missing Origin header"}), 403
         # -------------------------------
 
         api_key = config["gemini_api_key"]
@@ -91,7 +105,7 @@ def ask_ai(instance_id):
     raw_locale = data.get("locale", "en")
     locale = raw_locale[:2].lower() if raw_locale else "en"
     
-    # --- FIX: Convert empty string to None for UUID column ---
+    # Convert empty string to None for UUID column
     session_id = data.get("session_id") or None
     section_path = data.get("section_path") 
 

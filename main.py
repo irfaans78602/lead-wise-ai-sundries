@@ -5,8 +5,6 @@ from ask_ai import bp as ask_ai_bp
 
 def create_app():
     app = Flask(__name__)
-    # Broad CORS to allow requests from any tenant domain. 
-    # Security is enforced per-request in ask_ai.py based on allowed_origins.
     CORS(app, resources={r"/api/*": {"origins": "*"}})
     app.register_blueprint(ask_ai_bp)
 
