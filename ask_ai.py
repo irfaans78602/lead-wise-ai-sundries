@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify
-from db import get_conn, read_view, execute_write, get_tenant_config
+from db import get_conn, read_view, execute_write, get_tenant_config, release_conn
 from gemini import embed_query, generate_answer
 
 bp = Blueprint("ask_ai", __name__)
@@ -44,7 +44,7 @@ def get_settings(instance_id):
             if 'ask_ai_rate_limit_window_minutes' in db_settings: settings['rate_limit_window'] = db_settings['ask_ai_rate_limit_window_minutes']
             if 'ask_ai_chunk_limit' in db_settings: settings['chunk_limit'] = db_settings['ask_ai_chunk_limit']
         finally:
-            conn.close()
+            release_conn(conn)
     except Exception as e:
         print(f"[Ask AI] Failed to fetch settings for {instance_id}: {e}")
 
@@ -72,15 +72,10 @@ def ask_ai(instance_id):
         # --- STRICT CORS ORIGIN ENFORCEMENT ---
         allowed_origins_str = config.get("allowed_origins")
         if allowed_origins_str:
-            # 1. Clean allowed list: remove empty strings (trailing commas), strip whitespace, lowercase
             allowed_list = [o.strip().lower() for o in allowed_origins_str.split(",") if o.strip()]
-            
-            # 2. Get the request origin (Origin header is standard, Referer is fallback)
             raw_origin = request.headers.get("Origin") or request.headers.get("Referer", "")
             
             if raw_origin:
-                # 3. Parse the URL to extract just the base (e.g., "https://acme.com")
-                # This prevents "https://acme.com.evil.net" from matching "https://acme.com"
                 parsed = urlparse(raw_origin)
                 origin_base = f"{parsed.scheme}://{parsed.netloc}".lower()
                 
@@ -88,7 +83,6 @@ def ask_ai(instance_id):
                     print(f"[Ask AI] Blocked unauthorized origin: {origin_base}")
                     return jsonify({"error": "Unauthorized domain"}), 403
             else:
-                # If there is no Origin or Referer header, block the request.
                 print(f"[Ask AI] Blocked request with missing Origin/Referer header")
                 return jsonify({"error": "Missing Origin header"}), 403
         # -------------------------------
@@ -105,7 +99,6 @@ def ask_ai(instance_id):
     raw_locale = data.get("locale", "en")
     locale = raw_locale[:2].lower() if raw_locale else "en"
     
-    # Convert empty string to None for UUID column
     session_id = data.get("session_id") or None
     section_path = data.get("section_path") 
 
@@ -129,7 +122,7 @@ def ask_ai(instance_id):
                     sec = r["root_section"]
                     if sec: options.append({"id": sec, "en": sec})
             finally:
-                conn.close()
+                release_conn(conn)
         except Exception as e:
             print(f"[Ask AI] Failed to fetch sections: {e}")
             
@@ -168,7 +161,8 @@ def ask_ai(instance_id):
             row = read_view(conn, "SELECT count(*) FROM ask_ai_log WHERE ip_hash = %s AND submitted_at > %s", (ip_hash, cutoff), one=True)
             if row["count"] >= rate_limit_max:
                 return jsonify({"error": "You have reached the limit for AI questions."}), 429
-        finally: conn.close()
+        finally: 
+            release_conn(conn)
     except Exception as e: print(f"[Ask AI] Rate limit check failed: {e}")
 
     # Session History
@@ -178,7 +172,8 @@ def ask_ai(instance_id):
             try:
                 history_rows = read_view(conn, "SELECT question, answer FROM ask_ai_log WHERE session_id = %s AND ip_hash = %s AND status = 'success' ORDER BY submitted_at DESC LIMIT 3", (session_id, ip_hash))
                 history_rows = history_rows[::-1]
-            finally: conn.close()
+            finally: 
+                release_conn(conn)
         except Exception: pass
 
     # Small Talk Bypass
@@ -234,7 +229,7 @@ def ask_ai(instance_id):
                 chunks_found = len(rows)
                 context_text = "\n\n---\n\n".join(r["chunk_text"] for r in rows)
             finally: 
-                conn.close()
+                release_conn(conn)
         except Exception as e: 
             status = "db_error"
 
@@ -259,7 +254,7 @@ def ask_ai(instance_id):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (submission_id, session_id, question, answer, locale, ip_hash, status, chunks_found))
         finally: 
-            conn.close()
+            release_conn(conn)
     except Exception: pass
 
     return jsonify({"answer": answer, "submission_id": submission_id})

@@ -10,6 +10,13 @@
 *.pem
 *.key
 
+# Local secrets folder (secrets.json, etc.)
+secrets/
+
+# Specific cloud credential files (even if placed in the root)
+gcloud-credentials.json
+.service-account.json
+
 # --- Python Bytecode & Cache ---
 __pycache__/
 *.py[cod]
@@ -49,8 +56,3 @@ gunicorn.pid
 # --- Local Databases (if you ever use SQLite locally) ---
 *.sqlite3
 *.db
-
-# --- Cloud / Deployment specific ---
-# Ignore any local Cloud Run / GCP credentials
-gcloud-credentials.json
-.service-account.json

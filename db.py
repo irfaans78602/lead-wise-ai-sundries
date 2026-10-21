@@ -1,7 +1,7 @@
 """
 db.py
 Connection helper for Master DB and Tenant DBs.
-Includes advanced production logging for Render.com.
+Implements multi-tenant connection pooling for Render.
 """
 import env  # noqa: F401
 import os
@@ -10,8 +10,13 @@ import sys
 import time
 import logging
 import psycopg2
+import psycopg2.pool
+import psycopg2.extras
 from psycopg2.extras import RealDictCursor
 
+# -------------------------------------------------------------
+# 1. Logging Setup
+# -------------------------------------------------------------
 logger = logging.getLogger("db")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
@@ -27,6 +32,67 @@ if not DEBUG_SQL:
 MASTER_DATABASE_URL = os.environ.get("MASTER_DATABASE_URL") or os.environ.get("DATABASE_URL")
 _VIEW_RE = re.compile(r'\b(active_[a-z_]+)\b', re.IGNORECASE)
 
+# -------------------------------------------------------------
+# 2. Multi-Tenant Pool Manager
+# -------------------------------------------------------------
+_pools = {}       # db_url -> ThreadedConnectionPool
+_conn_pools = {}  # id(conn) -> ThreadedConnectionPool
+
+def get_pool(db_url):
+    global _pools
+    if db_url not in _pools:
+        _pools[db_url] = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=10,  # Max 10 connections per tenant
+            dsn=db_url,
+            client_encoding="utf8",
+            cursor_factory=RealDictCursor
+        )
+    return _pools[db_url]
+
+def _ping_conn(conn, pool):
+    """Checks if the connection is alive, replaces it if dead."""
+    try:
+        if conn.closed != 0:
+            raise psycopg2.OperationalError("Connection is closed")
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+    except psycopg2.OperationalError:
+        logger.warning("[DB] Dead connection detected. Replacing...")
+        pool.putconn(conn, close=True)
+        conn = pool.getconn()
+    return conn
+
+def get_master_conn():
+    pool = get_pool(MASTER_DATABASE_URL)
+    conn = pool.getconn()
+    conn = _ping_conn(conn, pool)
+    _conn_pools[id(conn)] = pool
+    return conn
+
+def get_conn(instance_id):
+    config = get_tenant_config(instance_id)
+    db_url = config["db_connect_string"]
+    pool = get_pool(db_url)
+    conn = pool.getconn()
+    conn = _ping_conn(conn, pool)
+    _conn_pools[id(conn)] = pool
+    return conn
+
+def release_conn(conn):
+    """Returns the connection to its correct pool."""
+    pool = _conn_pools.pop(id(conn), None)
+    if pool:
+        try: conn.rollback()
+        except Exception: pass
+        pool.putconn(conn)
+    else:
+        try: conn.close()
+        except Exception: pass
+
+# -------------------------------------------------------------
+# 3. Query Logging & Execution
+# -------------------------------------------------------------
 def _log_sql(sql, params, row_count, duration_ms):
     if not DEBUG_SQL and duration_ms < 500:
         return
@@ -77,17 +143,9 @@ def execute_write(conn, sql, params=None, commit=True):
         if len(sql_clean) > 150: sql_clean = sql_clean[:147] + "..."
         logger.info(f"[SQL-WRITE] {duration_ms:.1f}ms | {sql_clean}")
 
-def get_master_conn():
-    t0 = time.perf_counter()
-    try:
-        conn = psycopg2.connect(MASTER_DATABASE_URL, sslmode="require", cursor_factory=RealDictCursor)
-        duration_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"[DB-CONNECT] Master DB connected in {duration_ms:.1f}ms")
-        return conn
-    except Exception as e:
-        logger.error(f"[DB-CONNECT-ERROR] Master DB failed to connect: {e}")
-        raise
-
+# -------------------------------------------------------------
+# 4. Tenant Config
+# -------------------------------------------------------------
 def get_tenant_config(instance_id):
     conn = get_master_conn()
     try:
@@ -106,16 +164,4 @@ def get_tenant_config(instance_id):
             logger.error(f"[TENANT-CONFIG-ERROR] Failed to fetch config for {instance_id}: {e}")
         raise
     finally:
-        conn.close()
-
-def get_conn(instance_id):
-    config = get_tenant_config(instance_id)
-    t0 = time.perf_counter()
-    try:
-        conn = psycopg2.connect(config["db_connect_string"], sslmode="require", cursor_factory=RealDictCursor)
-        duration_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"[DB-CONNECT] Tenant DB connected for {instance_id[:8]}... in {duration_ms:.1f}ms")
-        return conn
-    except Exception as e:
-        logger.error(f"[DB-CONNECT-ERROR] Tenant DB failed to connect for {instance_id[:8]}...: {e}")
-        raise
+        release_conn(conn)
