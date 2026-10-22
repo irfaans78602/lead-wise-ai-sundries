@@ -1,6 +1,7 @@
 """
 update_secrets.py
 Reads local secrets/secrets.json and injects DB URLs and API keys into the Master DB.
+Any key starting with "_" (e.g. "_comment") is ignored, so comments can go anywhere.
 """
 import json
 import os
@@ -31,6 +32,9 @@ def run_update_secrets(secrets_file="secrets/secrets.json"):
         # 2. Loop through Clients
         clients = secrets.get("clients", {})
         for client_id, data in clients.items():
+            if client_id.startswith("_"):
+                continue
+
             client_db = data.get("db_connect_string")
             client_key = data.get("gemini_api_key")
             
@@ -50,6 +54,9 @@ def run_update_secrets(secrets_file="secrets/secrets.json"):
             # 3. Loop through Instances nested under this Client
             instances = data.get("instances", {})
             for instance_id, inst_data in instances.items():
+                if instance_id.startswith("_"):
+                    continue
+
                 inst_db = inst_data.get("db_connect_string")
                 inst_key = inst_data.get("gemini_api_key")
                 
