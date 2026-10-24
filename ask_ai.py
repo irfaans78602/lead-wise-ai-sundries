@@ -1,6 +1,6 @@
 """
 ask_ai.py
-Handles POST /api/ask-ai/<instance_id> securely with CORS enforcement.
+Handles POST /api/ask-ai/<instance_id> securely with CORS enforcement and signatures.
 """
 import os
 import re
@@ -10,8 +10,14 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify
-from db import get_conn, read_view, execute_write, get_tenant_config, release_conn
+from db import (
+    get_conn, read_view, execute_write,
+    get_tenant_config, get_master_conn, release_conn,
+)
 from gemini import embed_query, generate_answer
+
+# Import security helpers
+from security import SigningConfigError, verify_signature
 
 bp = Blueprint("ask_ai", __name__)
 CONTACT_LOG_IP_SALT = os.environ.get("CONTACT_LOG_IP_SALT", "")
@@ -31,18 +37,25 @@ def get_settings(instance_id):
         if cache["data"] and (now - cache["timestamp"] < 300):
             return cache["data"]
 
-    settings = {"rate_limit_max": DEFAULT_RATE_LIMIT_MAX, "rate_limit_window": DEFAULT_RATE_LIMIT_WINDOW, "chunk_limit": DEFAULT_CHUNK_LIMIT}
+    settings = {
+        "rate_limit_max": DEFAULT_RATE_LIMIT_MAX,
+        "rate_limit_window": DEFAULT_RATE_LIMIT_WINDOW,
+        "chunk_limit": DEFAULT_CHUNK_LIMIT,
+    }
     try:
-        conn = get_conn(instance_id)
+        conn = get_master_conn()
         try:
             rows = read_view(conn, """
-                SELECT setting_key, setting_value FROM active_settings 
+                SELECT setting_key, setting_value FROM active_settings
                 WHERE setting_key IN ('ask_ai_rate_limit_max', 'ask_ai_rate_limit_window_minutes', 'ask_ai_chunk_limit')
             """)
             db_settings = {row['setting_key']: int(row['setting_value']) for row in rows}
-            if 'ask_ai_rate_limit_max' in db_settings: settings['rate_limit_max'] = db_settings['ask_ai_rate_limit_max']
-            if 'ask_ai_rate_limit_window_minutes' in db_settings: settings['rate_limit_window'] = db_settings['ask_ai_rate_limit_window_minutes']
-            if 'ask_ai_chunk_limit' in db_settings: settings['chunk_limit'] = db_settings['ask_ai_chunk_limit']
+            if 'ask_ai_rate_limit_max' in db_settings:
+                settings['rate_limit_max'] = db_settings['ask_ai_rate_limit_max']
+            if 'ask_ai_rate_limit_window_minutes' in db_settings:
+                settings['rate_limit_window'] = db_settings['ask_ai_rate_limit_window_minutes']
+            if 'ask_ai_chunk_limit' in db_settings:
+                settings['chunk_limit'] = db_settings['ask_ai_chunk_limit']
         finally:
             release_conn(conn)
     except Exception as e:
@@ -55,11 +68,33 @@ def _hash_ip(ip):
     if not ip: return "unknown"
     return hashlib.sha256((ip + CONTACT_LOG_IP_SALT).encode()).hexdigest()
 
+def _verify_instance_sig(instance_id):
+    """
+    Verifies the signature passed in the query string.
+    Expects the signature to be generated for the instance_id itself.
+    """
+    sig = request.args.get("sig", "")
+    kid = request.args.get("kid") or None
+    
+    if not sig:
+        return False
+        
+    try:
+        return verify_signature(instance_id, sig, kid)
+    except SigningConfigError as e:
+        print(f"[Ask AI] SIGNING CONFIG ERROR: {e}")
+        return False
+
 @bp.route("/api/ask-ai/<instance_id>/config", methods=["GET"])
 def get_public_config(instance_id):
     """Lightweight endpoint for the frontend to fetch UI settings."""
     try:
         config = get_tenant_config(instance_id)
+        
+        # Require signature for config requests
+        if not _verify_instance_sig(instance_id):
+            return jsonify({"error": "Unauthorized"}), 401
+
         return jsonify({"brand_color": config.get("brand_color", "#3B82F6")}), 200
     except ValueError:
         return jsonify({"error": "Invalid instance ID"}), 404
@@ -69,7 +104,7 @@ def ask_ai(instance_id):
     try:
         config = get_tenant_config(instance_id)
         
-        # --- STRICT CORS ORIGIN ENFORCEMENT ---
+        # 1. STRICT CORS ORIGIN ENFORCEMENT
         allowed_origins_str = config.get("allowed_origins")
         if allowed_origins_str:
             allowed_list = [o.strip().lower() for o in allowed_origins_str.split(",") if o.strip()]
@@ -85,7 +120,11 @@ def ask_ai(instance_id):
             else:
                 print(f"[Ask AI] Blocked request with missing Origin/Referer header")
                 return jsonify({"error": "Missing Origin header"}), 403
-        # -------------------------------
+
+        # 2. SIGNATURE VERIFICATION
+        if not _verify_instance_sig(instance_id):
+            print(f"[Ask AI] Blocked invalid signature for instance: {instance_id}")
+            return jsonify({"error": "Unauthorized"}), 401
 
         api_key = config["gemini_api_key"]
         instance_type = config["instance_type"]

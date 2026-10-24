@@ -6,19 +6,20 @@ C:.
 |   .env
 |   .gitignore
 |   ask_ai.py
-|   contact_log.py
+|   cli.py
 |   db.py
 |   Dockerfile
+|   env.py
 |   gemini.py
 |   ingest_rag.py
 |   main.py
-|   README.md
 |   requirements.txt
-|   setup-gcp.ps1
-|   tree.txt
+|   security.py
+|   sign_ask_ai.py
 |   
 +---.github
 |   \---workflows
+|           check-gaps.yml
 |           deploy.yml
 |           
 +---.venv
@@ -5404,6 +5405,20 @@ C:.
 |       others.json
 |       segments.json
 |       
-\---tools
-        tree.ps1
++---secrets
+|       secrets.json
+|       
++---tools
+|       check_gaps.py
+|       collect-file-contents.ps1
+|       resolve_gaps.py
+|       sign_ask_ai.ps1
+|       tree.ps1
+|       
+\---__pycache__
+        db.cpython-314.pyc
+        env.cpython-314.pyc
+        gemini.cpython-314.pyc
+        ingest_rag.cpython-314.pyc
+        update_secrets.cpython-314.pyc
         

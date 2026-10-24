@@ -14,7 +14,7 @@
     console codepage doesn't match.
 
     tree.txt itself is not excluded from the tree output on subsequent runs,
-    but that is harmless — it is a single line at the root. If you want it
+    but that is harmless â€” it is a single line at the root. If you want it
     excluded, run this script from a parent folder or clean the file first.
 
 .EXAMPLE
